@@ -2,115 +2,12 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-HOST_FILES_DIR="${HOST_FILES_DIR:-${REPO_ROOT}/host-files}"
-
-ETC_ROOT="${ETC_ROOT:-/etc}"
-MODPROBE_DIR="${MODPROBE_DIR:-${ETC_ROOT}/modprobe.d}"
-UDEV_RULES_DIR="${UDEV_RULES_DIR:-${ETC_ROOT}/udev/rules.d}"
-SYSTEMD_ROOT="${SYSTEMD_ROOT:-${ETC_ROOT}/systemd/system}"
-USR_LOCAL_BIN_DIR="${USR_LOCAL_BIN_DIR:-/usr/local/bin}"
-MKINITCPIO_CONF_PATH="${MKINITCPIO_CONF_PATH:-${ETC_ROOT}/mkinitcpio.conf}"
-GRUB_DEFAULT_PATH="${GRUB_DEFAULT_PATH:-${ETC_ROOT}/default/grub}"
-GRUB_CFG_PATH="${GRUB_CFG_PATH:-/boot/grub/grub.cfg}"
-
-MKINITCPIO_BIN="${MKINITCPIO_BIN:-mkinitcpio}"
-GRUB_MKCONFIG_BIN="${GRUB_MKCONFIG_BIN:-grub-mkconfig}"
-SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
-UDEVADM_BIN="${UDEVADM_BIN:-udevadm}"
-INSTALL_BIN="${INSTALL_BIN:-install}"
-AORUS_BRIDGE_BIN="${AORUS_BRIDGE_BIN:-${REPO_ROOT}/aorus-bridge}"
+# shellcheck source=lib/install-common.sh
+source "${REPO_ROOT}/lib/install-common.sh"
 
 MKINITCPIO_DIRTY=0
 GRUB_DIRTY=0
 REBOOT_REQUIRED=0
-
-die() {
-    printf '%s\n' "$*" >&2
-    exit 1
-}
-
-require_root() {
-    if [[ "${AORUS_SETUP_ALLOW_NON_ROOT:-0}" == "1" ]]; then
-        return 0
-    fi
-
-    if [[ "$EUID" -ne 0 ]]; then
-        die 'setup.sh must be run as root'
-    fi
-}
-
-require_tool() {
-    local path="$1"
-    local label="$2"
-
-    command -v "$path" >/dev/null 2>&1 || die "missing required tool: ${label}"
-}
-
-backup_path_for() {
-    local path="$1"
-    local index=0
-    local candidate
-
-    while :; do
-        printf -v candidate '%s.aorus.%02d' "$path" "$index"
-        [[ ! -e "$candidate" ]] && {
-            printf '%s\n' "$candidate"
-            return 0
-        }
-        index=$((index + 1))
-    done
-}
-
-backup_existing_file() {
-    local path="$1"
-
-    [[ -f "$path" ]] || return 0
-    cp -- "$path" "$(backup_path_for "$path")"
-}
-
-write_if_changed() {
-    local target="$1"
-    local source="$2"
-
-    if [[ -f "$target" ]] && cmp -s "$source" "$target"; then
-        rm -f -- "$source"
-        return 1
-    fi
-
-    if [[ -f "$target" ]]; then
-        chmod --reference="$target" "$source"
-        if [[ "${AORUS_SETUP_ALLOW_NON_ROOT:-0}" != "1" ]]; then
-            chown --reference="$target" "$source"
-        fi
-    else
-        chmod 0644 "$source"
-    fi
-
-    backup_existing_file "$target"
-    mv -- "$source" "$target"
-    return 0
-}
-
-install_repo_file() {
-    local src="$1"
-    local dst="$2"
-    local mode="$3"
-
-    mkdir -p -- "$(dirname -- "$dst")"
-    if [[ -f "$dst" ]] && cmp -s "$src" "$dst"; then
-        return 1
-    fi
-
-    backup_existing_file "$dst"
-
-    if [[ "${AORUS_SETUP_ALLOW_NON_ROOT:-0}" == "1" ]]; then
-        "$INSTALL_BIN" -D -m "$mode" "$src" "$dst"
-    else
-        "$INSTALL_BIN" -o root -g root -D -m "$mode" "$src" "$dst"
-    fi
-
-    return 0
-}
 
 parse_shell_array_words() {
     local expression="$1"
@@ -255,6 +152,7 @@ rewrite_modprobe_file() {
 
 rewrite_modprobe_tree() {
     local file
+    local status
 
     mkdir -p -- "$MODPROBE_DIR"
     for file in "$MODPROBE_DIR"/*.conf; do
@@ -265,6 +163,9 @@ rewrite_modprobe_tree() {
 
     if install_repo_file "${HOST_FILES_DIR}/etc/modprobe.d/aorus.conf" "${MODPROBE_DIR}/aorus.conf" 0644; then
         MKINITCPIO_DIRTY=1
+    else
+        status=$?
+        [[ "$status" -eq "$INSTALL_REPO_FILE_UNCHANGED" ]] || return "$status"
     fi
 }
 
@@ -353,14 +254,46 @@ rewrite_grub() {
 }
 
 install_binaries() {
-    install_repo_file "${REPO_ROOT}/aorus-bridge" "${USR_LOCAL_BIN_DIR}/aorus-bridge" 0755 || true
-    install_repo_file "${REPO_ROOT}/aorus-modules" "${USR_LOCAL_BIN_DIR}/aorus-modules" 0755 || true
+    local status
+
+    if install_repo_file "${REPO_ROOT}/aorus-bridge" "${USR_LOCAL_BIN_DIR}/aorus-bridge" 0755; then
+        :
+    else
+        status=$?
+        [[ "$status" -eq "$INSTALL_REPO_FILE_UNCHANGED" ]] || return "$status"
+    fi
+
+    if install_repo_file "${REPO_ROOT}/aorus-modules" "${USR_LOCAL_BIN_DIR}/aorus-modules" 0755; then
+        :
+    else
+        status=$?
+        [[ "$status" -eq "$INSTALL_REPO_FILE_UNCHANGED" ]] || return "$status"
+    fi
 }
 
 install_host_files() {
-    install_repo_file "${HOST_FILES_DIR}/etc/udev/rules.d/80-aorus-disable-egpu-audio.rules" "${UDEV_RULES_DIR}/80-aorus-disable-egpu-audio.rules" 0644 || true
-    install_repo_file "${HOST_FILES_DIR}/etc/systemd/system/aorus.service" "${SYSTEMD_ROOT}/aorus.service" 0644 || true
-    install_repo_file "${HOST_FILES_DIR}/etc/systemd/system/nvidia-persistenced.service.d/aorus.conf" "${SYSTEMD_ROOT}/nvidia-persistenced.service.d/aorus.conf" 0644 || true
+    local status
+
+    if install_repo_file "${HOST_FILES_DIR}/etc/udev/rules.d/80-aorus-disable-egpu-audio.rules" "${UDEV_RULES_DIR}/80-aorus-disable-egpu-audio.rules" 0644; then
+        :
+    else
+        status=$?
+        [[ "$status" -eq "$INSTALL_REPO_FILE_UNCHANGED" ]] || return "$status"
+    fi
+
+    if install_repo_file "${HOST_FILES_DIR}/etc/systemd/system/aorus.service" "${SYSTEMD_ROOT}/aorus.service" 0644; then
+        :
+    else
+        status=$?
+        [[ "$status" -eq "$INSTALL_REPO_FILE_UNCHANGED" ]] || return "$status"
+    fi
+
+    if install_repo_file "${HOST_FILES_DIR}/etc/systemd/system/nvidia-persistenced.service.d/aorus.conf" "${SYSTEMD_ROOT}/nvidia-persistenced.service.d/aorus.conf" 0644; then
+        :
+    else
+        status=$?
+        [[ "$status" -eq "$INSTALL_REPO_FILE_UNCHANGED" ]] || return "$status"
+    fi
 }
 
 regenerate_if_needed() {
@@ -386,7 +319,7 @@ main() {
     local bridge
     local status
 
-    require_root
+    require_root 'install.sh'
     require_tool "$MKINITCPIO_BIN" 'mkinitcpio'
     require_tool "$GRUB_MKCONFIG_BIN" 'grub-mkconfig'
     require_tool "$INSTALL_BIN" 'install'
@@ -411,9 +344,9 @@ main() {
     reload_daemons
 
     if [[ "$REBOOT_REQUIRED" -eq 1 ]]; then
-        printf 'setup complete; reboot required\n'
+        printf 'install complete; reboot required\n'
     else
-        printf 'setup complete; no reboot required\n'
+        printf 'install complete; no reboot required\n'
     fi
 }
 

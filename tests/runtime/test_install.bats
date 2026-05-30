@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
-script="${repo_root}/setup.sh"
+script="${repo_root}/install.sh"
 host_files="${repo_root}/host-files"
 
 assert_equals() {
@@ -123,6 +123,14 @@ run_setup() {
     local root="$1"
     local bridge_bin="$2"
 
+    run_setup_with_host_files "$root" "$bridge_bin" "$host_files"
+}
+
+run_setup_with_host_files() {
+    local root="$1"
+    local bridge_bin="$2"
+    local host_files_root="$3"
+
     env \
         AORUS_SETUP_ALLOW_NON_ROOT=1 \
         PATH="${root}/bin:${PATH}" \
@@ -134,7 +142,7 @@ run_setup() {
         MKINITCPIO_CONF_PATH="${root}/etc/mkinitcpio.conf" \
         GRUB_DEFAULT_PATH="${root}/etc/default/grub" \
         GRUB_CFG_PATH="${root}/boot/grub/grub.cfg" \
-        HOST_FILES_DIR="$host_files" \
+        HOST_FILES_DIR="$host_files_root" \
         AORUS_BRIDGE_BIN="$bridge_bin" \
         bash "$script"
 }
@@ -381,11 +389,38 @@ EOF
     write_fake_bridge_script "$bridge_bin" 'if [[ "${1:-}" == "detect" ]]; then printf "hardware probe failed\n" >&2; exit 1; fi; exit 1'
 
     if run_setup_capture "$tmpdir" "$bridge_bin" "$stdout_file" "$stderr_file"; then
-        printf 'expected setup.sh to fail when aorus-bridge detect reports stderr\n' >&2
+        printf 'expected install.sh to fail when aorus-bridge detect reports stderr\n' >&2
         return 1
     fi
 
     assert_contains 'hardware probe failed' "$stderr_file"
+}
+
+test_missing_required_host_file_fails_install() {
+    local tmpdir log_file bridge_bin stdout_file stderr_file host_files_copy status
+    tmpdir="$(mktemp -d)"
+    trap "rm -rf -- '$tmpdir'" RETURN
+    log_file="${tmpdir}/commands.log"
+    : >"$log_file"
+    bridge_bin="${tmpdir}/aorus-bridge"
+    stdout_file="${tmpdir}/stdout.log"
+    stderr_file="${tmpdir}/stderr.log"
+    host_files_copy="${tmpdir}/host-files"
+
+    prepare_fake_root "$tmpdir" "$log_file"
+    write_fake_bridge "$bridge_bin" '0000:03:00.0'
+    cp -R "$host_files" "$host_files_copy"
+    rm -f -- "${host_files_copy}/etc/systemd/system/aorus.service"
+
+    if run_setup_with_host_files "$tmpdir" "$bridge_bin" "$host_files_copy" >"$stdout_file" 2>"$stderr_file"; then
+        printf 'expected install.sh to fail when a required host file is missing\n' >&2
+        return 1
+    else
+        status=$?
+    fi
+
+    assert_equals '1' "$status" 'install should fail when a required host file is missing'
+    assert_contains 'aorus.service' "$stderr_file"
 }
 
 test_installs_host_artifacts_and_enables_service() {
@@ -429,6 +464,7 @@ main() {
     test_grub_adds_missing_cmdline_directives
     test_grub_handles_single_quoted_cmdline_values
     test_detect_failure_with_stderr_is_fatal
+    test_missing_required_host_file_fails_install
     test_installs_host_artifacts_and_enables_service
 }
 
