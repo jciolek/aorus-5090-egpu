@@ -1,0 +1,323 @@
+#!/usr/bin/env bash
+# nvidia-driver-injector-bridge-link-cap
+#
+# Sets LnkCtl2 (Target Link Speed + bit 5 = Hardware Autonomous Speed
+# Disable) on the parent PCIe bridge of the AORUS RTX 5090, BEFORE
+# nvidia.ko binds. Eliminates the autonomous link-speed renegotiation
+# storm that triggers GSP_LOCKDOWN_NOTICE during GSP boot.
+#
+# === Mechanism (TB-tunneled paths — see docs/bridge-link-cap-mechanism.md) ===
+#
+# bit 5 of LnkCtl2 = "Hardware Autonomous Speed Disable" — blocks
+# firmware-initiated autonomous speed oscillation. Project history:
+# without bit 5 the link oscillates Gen3↔Gen4 at boot and GSP fires
+# 36 LOCKDOWN_NOTICE events. With bit 5, GSP boots clean.
+#
+# Target Link Speed (bits[3:0]) DOES affect bandwidth on TB-tunneled
+# paths — but only via the BOOT-TIME retrain. The TB controller
+# negotiates the tunnel rate during the cap-script's boot-time apply,
+# and that rate is committed for the rest of the session. Subsequent
+# runtime LnkCtl2 writes can change the register state but do NOT
+# move the tunnel bandwidth.
+#
+# Empirical evidence (2026-05-10):
+# - Boot with Gen1+bit5 → live H2D = 0.61 GB/s (Gen1 x4 saturated)
+# - Boot with Gen3+bit5 → live H2D = 2.83 GB/s (TB4 saturated)
+# - Live-writing Gen3 after a Gen1 boot did NOT restore bandwidth.
+#
+# What lspci shows is virtual: upstream-of-tunnel ports report
+# LnkCap=Gen1, and LnkSta on the eGPU-side bridge often reports Gen1
+# regardless of the actual tunnel rate. Use nvbandwidth (real
+# bytes/sec) to know what's really happening, not lspci.
+#
+# Once the tunnel is established, LnkCtl2 register state can drift
+# without affecting bandwidth. We observed Target rewriting from Gen3
+# back to Gen1 during the GPU's stop_device path on LAST-CLOSE — by
+# an unidentified entity (bridge auto-sync, GSP firmware via BR04,
+# or TB controller firmware; NOT the kernel's
+# pcie_failed_link_retrain quirk — its dmesg pci_info is absent and
+# M-recover traces show DLLLA stayed up, so the quirk's trigger
+# !DLLLA && LBMS_seen was never met).
+#
+# Target=Gen4 + retrain at boot froze the host on 2026-05-10 22:00
+# (n=1, no kernel trace preserved). Most plausible mechanism: TB
+# firmware deadlocking on the Gen4-virtual handshake — cannot prove
+# without trace-preserving reproduction.
+#
+# Target=Gen3 + bit 5 is the empirically validated default: PASS on
+# n=1 retest 2026-05-10 13:11, AND TB4-saturated bandwidth.
+#
+# === Usage ===
+#
+#   nvidia-driver-injector-bridge-link-cap apply        # default: Gen3+bit5
+#   CAP_TARGET_SPEED=2 nvidia-driver-injector-bridge-link-cap apply
+#   nvidia-driver-injector-bridge-link-cap restore     # clear bit 5
+#   nvidia-driver-injector-bridge-link-cap status
+#
+# === TB-tunneled gate ===
+#
+# `apply` is a clean no-op (exit 0) if the GPU is NOT behind a
+# Thunderbolt/USB4 tunnel. The cap mechanism is specifically a
+# workaround for TB controller / GSP firmware handshake quirks; on
+# direct PCIe slots the vendor-default behaviour is presumably correct
+# and a Gen3 cap could be wrong. Override with FORCE_TB=1 to apply
+# regardless, or FORCE_TB=0 to skip even on TB hardware.
+
+set -u
+
+VENDOR_ID="0x10de"        # NVIDIA
+DEVICE_ID="0x2b85"        # RTX 5090
+SETPCI_BIN="${SETPCI_BIN:-setpci}"
+LSPCI_BIN="${LSPCI_BIN:-lspci}"
+PCI_SYSFS_ROOT="${PCI_SYSFS_ROOT:-/sys/bus/pci/devices}"
+
+# CAP_TARGET_SPEED: defaults to Gen3 + bit 5.
+#
+# Why Gen3 (per docs/bridge-link-cap-mechanism.md):
+#
+# The TB tunnel rate is committed at the BOOT-TIME retrain — whatever
+# Target this script writes at boot pins the tunnel bandwidth for the
+# entire session. Subsequent LnkCtl2 changes do NOT move the actual
+# tunnel rate (verified empirically 2026-05-10 by live-writing Gen3
+# at runtime: bandwidth stayed at the boot-time-determined value).
+#
+# Measured H2D bandwidth as a function of boot-time cap (2026-05-10):
+#   Gen1+bit5 from boot →  0.61 GB/s   (PCIe Gen1 x4 saturated)
+#   Gen3+bit5 from boot →  2.83 GB/s   (TB4 saturated)  ← DEFAULT
+#   Gen4+bit5 from boot →  host freeze on workload (2026-05-10 22:00)
+#
+# Gen3+bit5 is the empirically validated PASS at full bandwidth on
+# the current stack (recovery state machine armed, iommu=off, Q-watchdog
+# kthread).
+#
+# Override via CAP_TARGET_SPEED env:
+#   1 = Gen1 (~80% bandwidth loss — diagnostic / fallback only)
+#   2 = Gen2 (untested; expected ~2 GB/s)
+#   3 = Gen3 (DEFAULT — n=1 PASS 2026-05-10 + TB4-saturated bandwidth)
+#   4 = Gen4 (DANGEROUS — froze the host on 2026-05-10 22:00)
+#   0 or unset = no Target change (vendor default Gen4 → DANGEROUS)
+TARGET_SPEED_OVERRIDE="${CAP_TARGET_SPEED:-3}"
+
+LNKCTL2_OFFSET="CAP_EXP+0x30.W"
+LNKCTL_OFFSET="CAP_EXP+0x10.W"
+LNKCTL2_BIT5_HW_AUTO_SPEED_DISABLE=0x20
+LNKCTL_BIT5_RETRAIN=0x20
+
+green() { printf '\033[32m%s\033[0m\n' "$*"; }
+yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
+red() { printf '\033[31m%s\033[0m\n' "$*" >&2; }
+
+# Find the PCI bridge directly above the AORUS RTX 5090 by walking
+# ${PCI_SYSFS_ROOT} for the matching vendor:device, then taking
+# the parent in the device tree. Works on either NUC TB4 port.
+detect_bridge() {
+    local d v dv
+    for d in "$PCI_SYSFS_ROOT"/*; do
+        [[ -r "$d/vendor" && -r "$d/device" ]] || continue
+        v=$(<"$d/vendor"); dv=$(<"$d/device")
+        if [[ "$v" == "$VENDOR_ID" && "$dv" == "$DEVICE_ID" ]]; then
+            basename "$(dirname "$(readlink -f "$d")")"
+            return 0
+        fi
+    done
+    return 1
+}
+
+cmd_detect() {
+    local bridge
+    if ! bridge=$(detect_bridge); then
+        exit 1
+    fi
+    printf '%s\n' "$bridge"
+}
+
+if [[ "${1:-}" == "detect" ]]; then
+    cmd_detect
+    exit 0
+fi
+
+# Walk the parent chain from the GPU upward; report success if any
+# parent's lspci description contains "Thunderbolt" or "USB4". This
+# is more robust than matching specific TB controller VID:DIDs (the
+# list grows with each new chip generation), and the kernel's
+# pci_dev->is_thunderbolt struct field is not exposed via sysfs.
+#
+# Returns 0 (true) if TB-tunneled, 1 (false) otherwise. Override
+# detection via FORCE_TB=1 (treat as TB) or FORCE_TB=0 (treat as
+# direct PCIe).
+is_tb_tunneled() {
+    local start_bdf="$1"
+    if [[ "${FORCE_TB:-}" == "1" ]]; then return 0; fi
+    if [[ "${FORCE_TB:-}" == "0" ]]; then return 1; fi
+    local cur="$PCI_SYSFS_ROOT/$start_bdf"
+    local depth=0 parent parent_bdf desc
+    while [[ $depth -lt 10 ]]; do
+        parent="$(dirname "$(readlink -f "$cur" 2>/dev/null)" 2>/dev/null)"
+        parent_bdf="$(basename "$parent" 2>/dev/null)"
+        [[ "$parent_bdf" =~ ^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\. ]] || return 1
+        desc="$("$LSPCI_BIN" -s "$parent_bdf" 2>/dev/null)"
+        grep -qiE 'Thunderbolt|USB4' <<<"$desc" && return 0
+        cur="$parent"
+        depth=$((depth+1))
+    done
+    return 1
+}
+
+# Override via BRIDGE= env if needed (e.g. for testing with a known BDF).
+BRIDGE="${BRIDGE:-$(detect_bridge || true)}"
+
+if [[ -z "$BRIDGE" ]]; then
+    yellow "No AORUS RTX 5090 (${VENDOR_ID}:${DEVICE_ID}) found on PCI bus"
+    yellow "(this is expected if the eGPU is disconnected; oneshot exits clean)"
+    exit 0
+fi
+
+# Need the GPU's BDF for TB-tunneled detection. detect_bridge already
+# walked ${PCI_SYSFS_ROOT} so re-walking is cheap.
+detect_gpu_bdf() {
+    local d v dv
+    for d in "$PCI_SYSFS_ROOT"/*; do
+        [[ -r "$d/vendor" && -r "$d/device" ]] || continue
+        v=$(<"$d/vendor"); dv=$(<"$d/device")
+        if [[ "$v" == "$VENDOR_ID" && "$dv" == "$DEVICE_ID" ]]; then
+            basename "$(readlink -f "$d")"
+            return 0
+        fi
+    done
+    return 1
+}
+GPU_BDF="$(detect_gpu_bdf || true)"
+
+# Gate the cap on TB-tunneled connectivity. The cap's mechanism (and
+# its hard-won Gen3+bit5 default) is specifically a workaround for the
+# TB controller / GSP firmware handshake. On non-TB hardware (eGPU in
+# an internal slot, OcuLink, or another non-TB attachment) the
+# vendor-default link behaviour is presumably correct, and writing a
+# Gen3 cap could degrade things or just be wrong. So: cap only when
+# the GPU is actually downstream of a TB tunnel.
+#
+# Override via FORCE_TB=1 to apply anyway (e.g. for hardware where
+# our detection misses a TB controller), or FORCE_TB=0 to skip.
+if ! is_tb_tunneled "$GPU_BDF"; then
+    yellow "GPU at ${GPU_BDF} is not behind a Thunderbolt/USB4 tunnel"
+    yellow "(parent chain has no Thunderbolt/USB4 device; skipping cap)"
+    yellow "Override with FORCE_TB=1 ${0##*/} apply if your hardware is misdetected"
+    exit 0
+fi
+
+read_word() {
+    local off="$1"
+    local label="$2" val
+    if ! val=$("$SETPCI_BIN" -s "$BRIDGE" "$off" 2>/dev/null) || [[ -z "$val" ]]; then
+        red "could not read ${label} from ${BRIDGE}"
+        return 1
+    fi
+    printf '%s\n' "$val"
+}
+
+write_word() {
+    local off="$1" val="$2" label="$3"
+    if ! "$SETPCI_BIN" -s "$BRIDGE" "${off}=${val}" >/dev/null 2>&1; then
+        red "could not write ${label}=${val} on ${BRIDGE}"
+        return 1
+    fi
+}
+
+cmd_apply() {
+    local cur
+    if ! cur=$(read_word "$LNKCTL2_OFFSET" "LnkCtl2"); then
+        exit 2
+    fi
+
+    local cur_int new_int new_hex
+    cur_int=$((0x$cur))
+
+    # Always: set bit 5 (HW Autonomous Speed Disable). This is the
+    # load-bearing mitigation per project history.
+    new_int=$(( cur_int | LNKCTL2_BIT5_HW_AUTO_SPEED_DISABLE ))
+
+    # Apply Target Link Speed unless explicitly opted out (CAP_TARGET_SPEED=0
+    # or empty). Default = "3" (Gen3) per the empirical-lesson note above.
+    if [[ -n "$TARGET_SPEED_OVERRIDE" && "$TARGET_SPEED_OVERRIDE" != "0" ]]; then
+        new_int=$(( (new_int & ~0xF) | (TARGET_SPEED_OVERRIDE & 0xF) ))
+        green "bridge=${BRIDGE}  setting bit 5 + Target=Gen${TARGET_SPEED_OVERRIDE}"
+    else
+        green "bridge=${BRIDGE}  setting bit 5 ONLY (Target Link Speed left at vendor value — NOT recommended on Port A)"
+    fi
+
+    new_hex=$(printf '%04x' "$new_int")
+
+    if [[ "$cur" == "$new_hex" ]]; then
+        green "  LnkCtl2 already 0x${cur} — no change needed"
+    else
+        write_word "$LNKCTL2_OFFSET" "$new_hex" "LnkCtl2" || exit 2
+        green "  LnkCtl2 0x${cur} → 0x${new_hex}"
+
+        # Retrain link so the change takes effect.
+        local lnkctl lnkctl_int retrain_int retrain_hex
+        if ! lnkctl=$(read_word "$LNKCTL_OFFSET" "LnkCtl"); then
+            exit 2
+        fi
+        lnkctl_int=$((0x$lnkctl))
+        retrain_int=$(( lnkctl_int | LNKCTL_BIT5_RETRAIN ))
+        retrain_hex=$(printf '%04x' "$retrain_int")
+        write_word "$LNKCTL_OFFSET" "$retrain_hex" "LnkCtl" || exit 2
+        green "  retrain triggered"
+    fi
+}
+
+cmd_restore() {
+    # Clear bit 5 of LnkCtl2 (re-enable hardware autonomous speed
+    # changes). This reverts the cap. If CAP_TARGET_SPEED was set on a
+    # previous apply, we don't try to remember + restore the original
+    # Target Link Speed — the original is whatever the bridge had at
+    # cold-boot, which we don't track.
+    local cur cur_int new_int new_hex
+    if ! cur=$(read_word "$LNKCTL2_OFFSET" "LnkCtl2"); then
+        exit 2
+    fi
+    cur_int=$((0x$cur))
+    new_int=$(( cur_int & ~LNKCTL2_BIT5_HW_AUTO_SPEED_DISABLE ))
+    new_hex=$(printf '%04x' "$new_int")
+    if [[ "$cur" == "$new_hex" ]]; then
+        yellow "bridge=${BRIDGE}  bit 5 already clear — no change (Target Link Speed left unchanged)"
+    else
+        write_word "$LNKCTL2_OFFSET" "$new_hex" "LnkCtl2" || exit 2
+        yellow "bridge=${BRIDGE}  LnkCtl2 0x${cur} → 0x${new_hex}  (bit 5 cleared; Target Link Speed left unchanged)"
+    fi
+}
+
+cmd_status() {
+    local lnkctl2 lnksta
+    if ! lnkctl2=$(read_word "$LNKCTL2_OFFSET" "LnkCtl2"); then
+        exit 2
+    fi
+    if ! lnksta=$(read_word CAP_EXP+0x12.W "LnkSta"); then
+        exit 2
+    fi
+    local target bit5 speed width active
+    target=$(( 0x$lnkctl2 & 0xF ))
+    bit5=$(( (0x$lnkctl2 >> 5) & 1 ))
+    speed=$(( 0x$lnksta & 0xF ))
+    width=$(( (0x$lnksta >> 4) & 0x3F ))
+    active=$(( (0x$lnksta >> 12) & 1 ))
+    cat <<EOF
+bridge=${BRIDGE}
+LnkCtl2=0x${lnkctl2}  TargetLinkSpeed=Gen${target}  HwAutoSpeedDisable(bit5)=${bit5}
+LnkSta=0x${lnksta}    LiveSpeed=Gen${speed}  Width=x${width}  Active=${active}
+EOF
+}
+
+case "${1:-}" in
+    apply)   cmd_apply ;;
+    restore) cmd_restore ;;
+    status)  cmd_status ;;
+    *)
+        red "Usage: $0 {apply|restore|status|detect}"
+        red ""
+        red "Default 'apply' sets bit 5 plus Target Link Speed Gen3."
+        red "Use CAP_TARGET_SPEED=<1|2|3|4> $0 apply to override the target speed."
+        red "'restore' clears bit 5 only and leaves Target Link Speed unchanged."
+        exit 1
+        ;;
+esac

@@ -1,0 +1,14 @@
+# Editor backups
+*.swp
+*.swo
+*~
+
+# Sed/temp leftovers
+*.tmp
+
+# Local worktree directories
+.worktrees/
+
+# Kernel module build artefacts (kernel-modules/*/ build outputs)
+/nvidia-open-dkms-*.pkg.tar.zst
+/nvidia-open-dkms-*.pkg.tar.zst.sig

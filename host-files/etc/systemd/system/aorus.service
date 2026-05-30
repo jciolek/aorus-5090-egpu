@@ -1,0 +1,15 @@
+[Unit]
+Description=Apply AORUS bridge cap and load NVIDIA modules
+After=systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+Before=nvidia-persistenced.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecCondition=/usr/local/bin/aorus-bridge detect
+ExecStart=/usr/local/bin/aorus-bridge apply
+ExecStart=/usr/local/bin/aorus-modules load
+
+[Install]
+WantedBy=multi-user.target

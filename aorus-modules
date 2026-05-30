@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MODPROBE_BIN="${MODPROBE_BIN:-modprobe}"
+
+usage() {
+    printf 'usage: aorus-modules [load]\n' >&2
+}
+
+cmd_load() {
+    "$MODPROBE_BIN" --ignore-install nvidia
+    "$MODPROBE_BIN" --ignore-install nvidia_uvm
+}
+
+case "${1:-load}" in
+    load)
+        shift || true
+        [[ $# -eq 0 ]] || {
+            usage
+            exit 2
+        }
+        cmd_load
+        ;;
+    *)
+        usage
+        exit 2
+        ;;
+esac
