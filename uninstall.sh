@@ -16,12 +16,12 @@ best_effort_runtime_rollback() {
     local modprobe_bin="${MODPROBE_BIN:-modprobe}"
 
     if [[ -x "$installed_bridge_bin" ]]; then
-        "$installed_bridge_bin" restore >/dev/null 2>&1 || true
+        run_quiet_action 'restoring live bridge state' "$installed_bridge_bin" restore || true
     fi
 
     if command -v "$modprobe_bin" >/dev/null 2>&1; then
         for module in "${modules[@]}"; do
-            "$modprobe_bin" -r "$module" >/dev/null 2>&1 || true
+            run_quiet_action "unloading ${module}" "$modprobe_bin" -r "$module" || true
         done
     fi
 }
@@ -197,7 +197,10 @@ restore_managed_mutable_file() {
     local backup
 
     if backup="$(newest_backup_path_for "$path")"; then
-        mv -- "$backup" "$path"
+        announce_action "restoring ${path}"
+        if [[ "$DRY_RUN" -eq 0 ]]; then
+            mv -- "$backup" "$path"
+        fi
         mark_generated_artifacts_dirty "$path"
         return 0
     fi
@@ -227,13 +230,16 @@ restore_or_remove_repo_owned_file() {
     local backup
 
     if backup="$(newest_backup_path_for "$path")"; then
-        mv -- "$backup" "$path"
+        announce_action "restoring ${path}"
+        if [[ "$DRY_RUN" -eq 0 ]]; then
+            mv -- "$backup" "$path"
+        fi
         mark_generated_artifacts_dirty "$path"
         return 0
     fi
 
     if [[ -e "$path" ]]; then
-        rm -f -- "$path"
+        run_action "removing ${path}" rm -f -- "$path"
         mark_generated_artifacts_dirty "$path"
     fi
 }
@@ -248,29 +254,33 @@ restore_or_remove_repo_owned_artifacts() {
 
 regenerate_if_needed() {
     if [[ "$MKINITCPIO_DIRTY" -eq 1 ]]; then
-        "$MKINITCPIO_BIN" -P
-        REBOOT_REQUIRED=1
+        run_action 'running mkinitcpio -P' "$MKINITCPIO_BIN" -P
+        [[ "$DRY_RUN" -eq 0 ]] && REBOOT_REQUIRED=1
     fi
 
     if [[ "$GRUB_DIRTY" -eq 1 ]]; then
-        "$GRUB_MKCONFIG_BIN" -o "$GRUB_CFG_PATH"
-        REBOOT_REQUIRED=1
+        run_action "running grub-mkconfig -o ${GRUB_CFG_PATH}" "$GRUB_MKCONFIG_BIN" -o "$GRUB_CFG_PATH"
+        [[ "$DRY_RUN" -eq 0 ]] && REBOOT_REQUIRED=1
     fi
+
+    return 0
 }
 
 reload_daemons() {
-    "$UDEVADM_BIN" control --reload-rules
-    "$SYSTEMCTL_BIN" daemon-reload
+    run_action 'reloading udev rules' "$UDEVADM_BIN" control --reload-rules
+    run_action 'reloading systemd manager' "$SYSTEMCTL_BIN" daemon-reload
 }
 
 main() {
+    parse_common_args "$@"
+
     require_root 'uninstall.sh'
     require_tool "$MKINITCPIO_BIN" 'mkinitcpio'
     require_tool "$GRUB_MKCONFIG_BIN" 'grub-mkconfig'
     require_tool "$SYSTEMCTL_BIN" 'systemctl'
     require_tool "$UDEVADM_BIN" 'udevadm'
 
-    "$SYSTEMCTL_BIN" disable aorus.service >/dev/null 2>&1 || true
+    run_quiet_action 'disabling aorus.service' "$SYSTEMCTL_BIN" disable aorus.service || true
 
     best_effort_runtime_rollback
     restore_managed_mutable_file "$MKINITCPIO_CONF_PATH" mkinitcpio_has_managed_edits

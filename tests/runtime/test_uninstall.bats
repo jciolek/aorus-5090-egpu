@@ -88,6 +88,13 @@ EOF
 run_uninstall() {
     local root="$1"
 
+    run_uninstall_with_args "$root"
+}
+
+run_uninstall_with_args() {
+    local root="$1"
+    shift
+
     env \
         AORUS_SETUP_ALLOW_NON_ROOT=1 \
         PATH="${root}/bin:${PATH}" \
@@ -99,15 +106,29 @@ run_uninstall() {
         MKINITCPIO_CONF_PATH="${root}/etc/mkinitcpio.conf" \
         GRUB_DEFAULT_PATH="${root}/etc/default/grub" \
         GRUB_CFG_PATH="${root}/boot/grub/grub.cfg" \
-        bash "$script"
+        bash "$script" "$@"
+}
+
+snapshot_host_tree() {
+    local root="$1"
+
+    tar --sort=name \
+        --mtime='UTC 1970-01-01' \
+        --owner=0 \
+        --group=0 \
+        --numeric-owner \
+        -cf - \
+        -C "$root" \
+        etc usr boot | sha256sum | cut -d' ' -f1
 }
 
 run_uninstall_capture() {
     local root="$1"
     local stdout_file="$2"
     local stderr_file="$3"
+    shift 3
 
-    if run_uninstall "$root" >"$stdout_file" 2>"$stderr_file"; then
+    if run_uninstall_with_args "$root" "$@" >"$stdout_file" 2>"$stderr_file"; then
         return 0
     fi
     return 1
@@ -377,6 +398,121 @@ EOF
     assert_contains 'missing backup for managed file' "$stderr_file"
 }
 
+test_uninstall_dry_run_announces_restore_and_remove_actions_without_mutating_host() {
+    local tmpdir log_file stdout_file stderr_file before after
+    tmpdir="$(mktemp -d)"
+    trap "rm -rf -- '$tmpdir'" RETURN
+    log_file="${tmpdir}/commands.log"
+    stdout_file="${tmpdir}/stdout.log"
+    stderr_file="${tmpdir}/stderr.log"
+    : >"$log_file"
+
+    prepare_fake_root "$tmpdir" "$log_file"
+    seed_installed_state "$tmpdir"
+    write_fake_bridge_helper "${tmpdir}/usr/local/bin/aorus-bridge" "$log_file"
+    before="$(snapshot_host_tree "$tmpdir")"
+
+    if ! run_uninstall_capture "$tmpdir" "$stdout_file" "$stderr_file" --dry-run; then
+        printf 'expected uninstall.sh --dry-run to succeed\n' >&2
+        return 1
+    fi
+
+    after="$(snapshot_host_tree "$tmpdir")"
+    assert_equals "$before" "$after" 'uninstall dry-run should not mutate the fake host tree'
+    assert_file_content '' "$log_file"
+    assert_contains '[dry-run] disabling aorus.service' "$stdout_file"
+    assert_contains '[dry-run] restoring live bridge state' "$stdout_file"
+    assert_contains '[dry-run] unloading nvidia_uvm' "$stdout_file"
+    assert_contains "[dry-run] restoring ${tmpdir}/etc/mkinitcpio.conf" "$stdout_file"
+    assert_contains "[dry-run] restoring ${tmpdir}/etc/default/grub" "$stdout_file"
+    assert_contains "[dry-run] removing ${tmpdir}/usr/local/bin/aorus-modules" "$stdout_file"
+    assert_contains '[dry-run] running mkinitcpio -P' "$stdout_file"
+    assert_contains '[dry-run] reloading systemd manager' "$stdout_file"
+    assert_contains 'uninstall complete; no reboot required' "$stdout_file"
+}
+
+test_uninstall_announces_each_file_mutation_and_non_file_action() {
+    local tmpdir log_file stdout_file stderr_file
+    tmpdir="$(mktemp -d)"
+    trap "rm -rf -- '$tmpdir'" RETURN
+    log_file="${tmpdir}/commands.log"
+    stdout_file="${tmpdir}/stdout.log"
+    stderr_file="${tmpdir}/stderr.log"
+    : >"$log_file"
+
+    prepare_fake_root "$tmpdir" "$log_file"
+    seed_installed_state "$tmpdir"
+    write_fake_bridge_helper "${tmpdir}/usr/local/bin/aorus-bridge" "$log_file"
+
+    if ! run_uninstall_capture "$tmpdir" "$stdout_file" "$stderr_file"; then
+        printf 'expected uninstall.sh to succeed for announcement coverage\n' >&2
+        return 1
+    fi
+
+    assert_contains 'disabling aorus.service' "$stdout_file"
+    assert_contains 'restoring live bridge state' "$stdout_file"
+    assert_contains 'unloading nvidia_uvm' "$stdout_file"
+    assert_contains "restoring ${tmpdir}/etc/mkinitcpio.conf" "$stdout_file"
+    assert_contains "restoring ${tmpdir}/etc/default/grub" "$stdout_file"
+    assert_contains "restoring ${tmpdir}/etc/modprobe.d/existing.conf" "$stdout_file"
+    assert_contains "restoring ${tmpdir}/etc/modprobe.d/deleted.conf" "$stdout_file"
+    assert_contains "removing ${tmpdir}/usr/local/bin/aorus-bridge" "$stdout_file"
+    assert_contains "removing ${tmpdir}/etc/systemd/system/aorus.service" "$stdout_file"
+    assert_contains 'running mkinitcpio -P' "$stdout_file"
+    assert_contains 'running grub-mkconfig -o ' "$stdout_file"
+    assert_contains 'reloading udev rules' "$stdout_file"
+    assert_contains 'reloading systemd manager' "$stdout_file"
+}
+
+test_uninstall_dry_run_preserves_missing_backup_failure() {
+    local tmpdir log_file stdout_file stderr_file status
+    tmpdir="$(mktemp -d)"
+    trap "rm -rf -- '$tmpdir'" RETURN
+    log_file="${tmpdir}/commands.log"
+    stdout_file="${tmpdir}/stdout.log"
+    stderr_file="${tmpdir}/stderr.log"
+    : >"$log_file"
+
+    prepare_fake_root "$tmpdir" "$log_file"
+    cat >"${tmpdir}/etc/modprobe.d/existing.conf" <<'EOF'
+# aorus-disabled: options nvidia NVreg_Foo=1
+options snd_hda_intel power_save=1
+EOF
+
+    if run_uninstall_capture "$tmpdir" "$stdout_file" "$stderr_file" --dry-run; then
+        printf 'expected uninstall.sh --dry-run to fail when a managed backup is missing\n' >&2
+        return 1
+    else
+        status=$?
+    fi
+
+    assert_equals '1' "$status" 'uninstall dry-run should preserve missing-backup failures'
+    assert_contains 'missing backup for managed file' "$stderr_file"
+}
+
+test_uninstall_rejects_unknown_args() {
+    local tmpdir log_file stdout_file stderr_file status
+    tmpdir="$(mktemp -d)"
+    trap "rm -rf -- '$tmpdir'" RETURN
+    log_file="${tmpdir}/commands.log"
+    stdout_file="${tmpdir}/stdout.log"
+    stderr_file="${tmpdir}/stderr.log"
+    : >"$log_file"
+
+    prepare_fake_root "$tmpdir" "$log_file"
+    seed_installed_state "$tmpdir"
+
+    if run_uninstall_capture "$tmpdir" "$stdout_file" "$stderr_file" --wat; then
+        printf 'expected uninstall.sh to reject unknown arguments\n' >&2
+        return 1
+    else
+        status=$?
+    fi
+
+    assert_equals '1' "$status" 'uninstall should reject unknown arguments'
+    assert_contains 'unknown argument: --wat' "$stderr_file"
+}
+
 test_uninstall_reports_its_own_root_requirement() {
     local tmpdir log_file stdout_file stderr_file status
     tmpdir="$(mktemp -d)"
@@ -417,6 +553,10 @@ main() {
     test_uninstall_fails_when_managed_modprobe_file_has_no_backup
     test_uninstall_fails_when_canonical_managed_grub_has_no_backup
     test_uninstall_fails_when_install_managed_mkinitcpio_has_no_backup
+    test_uninstall_dry_run_announces_restore_and_remove_actions_without_mutating_host
+    test_uninstall_announces_each_file_mutation_and_non_file_action
+    test_uninstall_dry_run_preserves_missing_backup_failure
+    test_uninstall_rejects_unknown_args
     test_uninstall_reports_its_own_root_requirement
 }
 
