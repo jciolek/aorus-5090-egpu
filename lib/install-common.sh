@@ -20,6 +20,68 @@ UDEVADM_BIN="${UDEVADM_BIN:-udevadm}"
 INSTALL_BIN="${INSTALL_BIN:-install}"
 AORUS_BRIDGE_BIN="${AORUS_BRIDGE_BIN:-${REPO_ROOT}/aorus-bridge}"
 INSTALL_REPO_FILE_UNCHANGED=10
+DRY_RUN=0
+
+parse_common_args() {
+    DRY_RUN=0
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dry-run)
+                DRY_RUN=1
+                ;;
+            *)
+                die "unknown argument: $1"
+                ;;
+        esac
+        shift
+    done
+}
+
+announce_action() {
+    local message="$1"
+
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        printf '[dry-run] %s\n' "$message"
+    else
+        printf '%s\n' "$message"
+    fi
+}
+
+run_action() {
+    local message="$1"
+    shift
+
+    announce_action "$message"
+    [[ "$DRY_RUN" -eq 1 ]] && return 0
+    "$@"
+}
+
+run_quiet_action() {
+    local message="$1"
+    shift
+
+    announce_action "$message"
+    [[ "$DRY_RUN" -eq 1 ]] && return 0
+    "$@" >/dev/null 2>&1
+}
+
+ensure_directory() {
+    local path="$1"
+
+    [[ -d "$path" ]] && return 0
+    run_action "creating directory ${path}" mkdir -p -- "$path"
+}
+
+file_write_message() {
+    local path="$1"
+
+    if [[ -e "$path" ]]; then
+        printf 'replacing %s\n' "$path"
+    else
+        printf 'installing %s\n' "$path"
+    fi
+}
 
 die() {
     printf '%s\n' "$*" >&2
@@ -89,6 +151,7 @@ backup_existing_file() {
 write_if_changed() {
     local target="$1"
     local source="$2"
+    local message
 
     if [[ -f "$target" ]] && cmp -s "$source" "$target"; then
         rm -f -- "$source"
@@ -104,8 +167,15 @@ write_if_changed() {
         chmod 0644 "$source"
     fi
 
+    message="$(file_write_message "$target")"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        announce_action "$message"
+        rm -f -- "$source"
+        return 0
+    fi
+
     backup_existing_file "$target"
-    mv -- "$source" "$target"
+    run_action "$message" mv -- "$source" "$target"
     return 0
 }
 
@@ -113,18 +183,26 @@ install_repo_file() {
     local src="$1"
     local dst="$2"
     local mode="$3"
+    local message
 
-    mkdir -p -- "$(dirname -- "$dst")" || return $?
+    [[ -f "$src" ]] || die "missing required file: ${src}"
+    ensure_directory "$(dirname -- "$dst")" || return $?
     if [[ -f "$dst" ]] && cmp -s "$src" "$dst"; then
         return "$INSTALL_REPO_FILE_UNCHANGED"
+    fi
+
+    message="$(file_write_message "$dst")"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        announce_action "$message"
+        return 0
     fi
 
     backup_existing_file "$dst" || return $?
 
     if [[ "${AORUS_SETUP_ALLOW_NON_ROOT:-0}" == "1" ]]; then
-        "$INSTALL_BIN" -D -m "$mode" "$src" "$dst" || return $?
+        run_action "$message" "$INSTALL_BIN" -D -m "$mode" "$src" "$dst" || return $?
     else
-        "$INSTALL_BIN" -o root -g root -D -m "$mode" "$src" "$dst" || return $?
+        run_action "$message" "$INSTALL_BIN" -o root -g root -D -m "$mode" "$src" "$dst" || return $?
     fi
 
     return 0

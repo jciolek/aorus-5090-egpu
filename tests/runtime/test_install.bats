@@ -123,13 +123,35 @@ run_setup() {
     local root="$1"
     local bridge_bin="$2"
 
-    run_setup_with_host_files "$root" "$bridge_bin" "$host_files"
+    run_setup_with_args "$root" "$bridge_bin"
+}
+
+run_setup_with_args() {
+    local root="$1"
+    local bridge_bin="$2"
+    shift 2
+
+    env \
+        AORUS_SETUP_ALLOW_NON_ROOT=1 \
+        PATH="${root}/bin:${PATH}" \
+        ETC_ROOT="${root}/etc" \
+        MODPROBE_DIR="${root}/etc/modprobe.d" \
+        UDEV_RULES_DIR="${root}/etc/udev/rules.d" \
+        SYSTEMD_ROOT="${root}/etc/systemd/system" \
+        USR_LOCAL_BIN_DIR="${root}/usr/local/bin" \
+        MKINITCPIO_CONF_PATH="${root}/etc/mkinitcpio.conf" \
+        GRUB_DEFAULT_PATH="${root}/etc/default/grub" \
+        GRUB_CFG_PATH="${root}/boot/grub/grub.cfg" \
+        HOST_FILES_DIR="$host_files" \
+        AORUS_BRIDGE_BIN="$bridge_bin" \
+        bash "$script" "$@"
 }
 
 run_setup_with_host_files() {
     local root="$1"
     local bridge_bin="$2"
     local host_files_root="$3"
+    shift 3
 
     env \
         AORUS_SETUP_ALLOW_NON_ROOT=1 \
@@ -144,7 +166,7 @@ run_setup_with_host_files() {
         GRUB_CFG_PATH="${root}/boot/grub/grub.cfg" \
         HOST_FILES_DIR="$host_files_root" \
         AORUS_BRIDGE_BIN="$bridge_bin" \
-        bash "$script"
+        bash "$script" "$@"
 }
 
 run_setup_capture() {
@@ -152,11 +174,25 @@ run_setup_capture() {
     local bridge_bin="$2"
     local stdout_file="$3"
     local stderr_file="$4"
+    shift 4
 
-    if run_setup "$root" "$bridge_bin" >"$stdout_file" 2>"$stderr_file"; then
+    if run_setup_with_args "$root" "$bridge_bin" "$@" >"$stdout_file" 2>"$stderr_file"; then
         return 0
     fi
     return 1
+}
+
+snapshot_host_tree() {
+    local root="$1"
+
+    tar --sort=name \
+        --mtime='UTC 1970-01-01' \
+        --owner=0 \
+        --group=0 \
+        --numeric-owner \
+        -cf - \
+        -C "$root" \
+        etc usr boot | sha256sum | cut -d' ' -f1
 }
 
 prepare_fake_root() {
@@ -423,6 +459,149 @@ test_missing_required_host_file_fails_install() {
     assert_contains 'aorus.service' "$stderr_file"
 }
 
+test_install_dry_run_announces_actions_without_mutating_host() {
+    local tmpdir log_file bridge_bin stdout_file stderr_file before after
+    tmpdir="$(mktemp -d)"
+    trap "rm -rf -- '$tmpdir'" RETURN
+    log_file="${tmpdir}/commands.log"
+    stdout_file="${tmpdir}/stdout.log"
+    stderr_file="${tmpdir}/stderr.log"
+    : >"$log_file"
+    bridge_bin="${tmpdir}/aorus-bridge"
+
+    prepare_fake_root "$tmpdir" "$log_file"
+    write_fake_bridge "$bridge_bin" '0000:03:00.0'
+    before="$(snapshot_host_tree "$tmpdir")"
+
+    if ! run_setup_capture "$tmpdir" "$bridge_bin" "$stdout_file" "$stderr_file" --dry-run; then
+        printf 'expected install.sh --dry-run to succeed\n' >&2
+        return 1
+    fi
+
+    after="$(snapshot_host_tree "$tmpdir")"
+    assert_equals "$before" "$after" 'install dry-run should not mutate the fake host tree'
+    assert_file_content '' "$log_file"
+    assert_contains "[dry-run] replacing ${tmpdir}/etc/mkinitcpio.conf" "$stdout_file"
+    assert_contains "[dry-run] replacing ${tmpdir}/etc/modprobe.d/existing.conf" "$stdout_file"
+    assert_contains "[dry-run] replacing ${tmpdir}/etc/default/grub" "$stdout_file"
+    assert_contains "[dry-run] installing ${tmpdir}/usr/local/bin/aorus-bridge" "$stdout_file"
+    assert_contains "[dry-run] installing ${tmpdir}/etc/systemd/system/aorus.service" "$stdout_file"
+    assert_contains '[dry-run] running mkinitcpio -P' "$stdout_file"
+    assert_contains '[dry-run] reloading udev rules' "$stdout_file"
+    assert_contains 'install complete; no reboot required' "$stdout_file"
+}
+
+test_install_dry_run_does_not_create_missing_modprobe_dir() {
+    local tmpdir log_file bridge_bin stdout_file stderr_file
+    tmpdir="$(mktemp -d)"
+    trap "rm -rf -- '$tmpdir'" RETURN
+    log_file="${tmpdir}/commands.log"
+    stdout_file="${tmpdir}/stdout.log"
+    stderr_file="${tmpdir}/stderr.log"
+    : >"$log_file"
+    bridge_bin="${tmpdir}/aorus-bridge"
+
+    prepare_fake_root "$tmpdir" "$log_file"
+    write_fake_bridge "$bridge_bin" '0000:03:00.0'
+    rm -rf -- "${tmpdir}/etc/modprobe.d"
+
+    if ! run_setup_capture "$tmpdir" "$bridge_bin" "$stdout_file" "$stderr_file" --dry-run; then
+        printf 'expected install.sh --dry-run to succeed without modprobe.d present\n' >&2
+        return 1
+    fi
+
+    [[ ! -d "${tmpdir}/etc/modprobe.d" ]] || {
+        printf 'expected dry-run to leave modprobe.d absent\n' >&2
+        return 1
+    }
+    assert_contains "[dry-run] creating directory ${tmpdir}/etc/modprobe.d" "$stdout_file"
+    assert_file_content '' "$log_file"
+}
+
+test_install_announces_each_file_mutation_and_non_file_action() {
+    local tmpdir log_file bridge_bin stdout_file stderr_file
+    tmpdir="$(mktemp -d)"
+    trap "rm -rf -- '$tmpdir'" RETURN
+    log_file="${tmpdir}/commands.log"
+    stdout_file="${tmpdir}/stdout.log"
+    stderr_file="${tmpdir}/stderr.log"
+    : >"$log_file"
+    bridge_bin="${tmpdir}/aorus-bridge"
+
+    prepare_fake_root "$tmpdir" "$log_file"
+    write_fake_bridge "$bridge_bin" '0000:03:00.0'
+
+    if ! run_setup_capture "$tmpdir" "$bridge_bin" "$stdout_file" "$stderr_file"; then
+        printf 'expected install.sh to succeed for announcement coverage\n' >&2
+        return 1
+    fi
+
+    assert_contains "replacing ${tmpdir}/etc/mkinitcpio.conf" "$stdout_file"
+    assert_contains "replacing ${tmpdir}/etc/modprobe.d/existing.conf" "$stdout_file"
+    assert_contains "replacing ${tmpdir}/etc/default/grub" "$stdout_file"
+    assert_contains "installing ${tmpdir}/usr/local/bin/aorus-bridge" "$stdout_file"
+    assert_contains "installing ${tmpdir}/usr/local/bin/aorus-modules" "$stdout_file"
+    assert_contains "installing ${tmpdir}/etc/modprobe.d/aorus.conf" "$stdout_file"
+    assert_contains 'running mkinitcpio -P' "$stdout_file"
+    assert_contains 'running grub-mkconfig -o ' "$stdout_file"
+    assert_contains 'reloading udev rules' "$stdout_file"
+    assert_contains 'triggering NVIDIA PCI add uevents' "$stdout_file"
+    assert_contains 'reloading systemd manager' "$stdout_file"
+    assert_contains 'enabling aorus.service' "$stdout_file"
+}
+
+test_install_rejects_unknown_args() {
+    local tmpdir log_file bridge_bin stdout_file stderr_file status
+    tmpdir="$(mktemp -d)"
+    trap "rm -rf -- '$tmpdir'" RETURN
+    log_file="${tmpdir}/commands.log"
+    stdout_file="${tmpdir}/stdout.log"
+    stderr_file="${tmpdir}/stderr.log"
+    : >"$log_file"
+    bridge_bin="${tmpdir}/aorus-bridge"
+
+    prepare_fake_root "$tmpdir" "$log_file"
+    write_fake_bridge "$bridge_bin" '0000:03:00.0'
+
+    if run_setup_capture "$tmpdir" "$bridge_bin" "$stdout_file" "$stderr_file" --wat; then
+        printf 'expected install.sh to reject unknown arguments\n' >&2
+        return 1
+    else
+        status=$?
+    fi
+
+    assert_equals '1' "$status" 'install should reject unknown arguments'
+    assert_contains 'unknown argument: --wat' "$stderr_file"
+}
+
+test_install_dry_run_fails_when_required_host_file_is_missing() {
+    local tmpdir log_file bridge_bin stdout_file stderr_file host_files_copy status
+    tmpdir="$(mktemp -d)"
+    trap "rm -rf -- '$tmpdir'" RETURN
+    log_file="${tmpdir}/commands.log"
+    stdout_file="${tmpdir}/stdout.log"
+    stderr_file="${tmpdir}/stderr.log"
+    : >"$log_file"
+    bridge_bin="${tmpdir}/aorus-bridge"
+    host_files_copy="${tmpdir}/host-files"
+
+    prepare_fake_root "$tmpdir" "$log_file"
+    write_fake_bridge "$bridge_bin" '0000:03:00.0'
+    cp -R "$host_files" "$host_files_copy"
+    rm -f -- "${host_files_copy}/etc/systemd/system/aorus.service"
+
+    if run_setup_with_host_files "$tmpdir" "$bridge_bin" "$host_files_copy" --dry-run >"$stdout_file" 2>"$stderr_file"; then
+        printf 'expected install.sh --dry-run to fail when a required host file is missing\n' >&2
+        return 1
+    else
+        status=$?
+    fi
+
+    assert_equals '1' "$status" 'install dry-run should fail when a required host file is missing'
+    assert_contains 'aorus.service' "$stderr_file"
+    assert_file_content '' "$log_file"
+}
+
 test_installs_host_artifacts_and_enables_service() {
     local tmpdir log_file bridge_bin
     tmpdir="$(mktemp -d)"
@@ -465,6 +644,11 @@ main() {
     test_grub_handles_single_quoted_cmdline_values
     test_detect_failure_with_stderr_is_fatal
     test_missing_required_host_file_fails_install
+    test_install_dry_run_announces_actions_without_mutating_host
+    test_install_dry_run_does_not_create_missing_modprobe_dir
+    test_install_announces_each_file_mutation_and_non_file_action
+    test_install_rejects_unknown_args
+    test_install_dry_run_fails_when_required_host_file_is_missing
     test_installs_host_artifacts_and_enables_service
 }
 

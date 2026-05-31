@@ -154,7 +154,7 @@ rewrite_modprobe_tree() {
     local file
     local status
 
-    mkdir -p -- "$MODPROBE_DIR"
+    ensure_directory "$MODPROBE_DIR"
     for file in "$MODPROBE_DIR"/*.conf; do
         [[ -e "$file" ]] || continue
         [[ "$file" == "$MODPROBE_DIR/aorus.conf" ]] && continue
@@ -298,26 +298,30 @@ install_host_files() {
 
 regenerate_if_needed() {
     if [[ "$MKINITCPIO_DIRTY" -eq 1 ]]; then
-        "$MKINITCPIO_BIN" -P
-        REBOOT_REQUIRED=1
+        run_action 'running mkinitcpio -P' "$MKINITCPIO_BIN" -P
+        [[ "$DRY_RUN" -eq 0 ]] && REBOOT_REQUIRED=1
     fi
 
     if [[ "$GRUB_DIRTY" -eq 1 ]]; then
-        "$GRUB_MKCONFIG_BIN" -o "$GRUB_CFG_PATH"
-        REBOOT_REQUIRED=1
+        run_action "running grub-mkconfig -o ${GRUB_CFG_PATH}" "$GRUB_MKCONFIG_BIN" -o "$GRUB_CFG_PATH"
+        [[ "$DRY_RUN" -eq 0 ]] && REBOOT_REQUIRED=1
     fi
+
+    return 0
 }
 
 reload_daemons() {
-    "$UDEVADM_BIN" control --reload-rules
-    "$UDEVADM_BIN" trigger --subsystem-match=pci --attr-match=vendor=0x10de --attr-match=device=0x22e8 --action=add || true
-    "$SYSTEMCTL_BIN" daemon-reload
-    "$SYSTEMCTL_BIN" enable aorus.service
+    run_action 'reloading udev rules' "$UDEVADM_BIN" control --reload-rules
+    run_action 'triggering NVIDIA PCI add uevents' "$UDEVADM_BIN" trigger --subsystem-match=pci --attr-match=vendor=0x10de --attr-match=device=0x22e8 --action=add || true
+    run_action 'reloading systemd manager' "$SYSTEMCTL_BIN" daemon-reload
+    run_action 'enabling aorus.service' "$SYSTEMCTL_BIN" enable aorus.service
 }
 
 main() {
     local bridge
     local status
+
+    parse_common_args "$@"
 
     require_root 'install.sh'
     require_tool "$MKINITCPIO_BIN" 'mkinitcpio'
