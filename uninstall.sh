@@ -252,20 +252,6 @@ restore_or_remove_repo_owned_artifacts() {
     done < <(repo_owned_artifact_paths)
 }
 
-regenerate_if_needed() {
-    if [[ "$MKINITCPIO_DIRTY" -eq 1 ]]; then
-        run_action 'running mkinitcpio -P' "$MKINITCPIO_BIN" -P
-        [[ "$DRY_RUN" -eq 0 ]] && REBOOT_REQUIRED=1
-    fi
-
-    if [[ "$GRUB_DIRTY" -eq 1 ]]; then
-        run_action "running grub-mkconfig -o ${GRUB_CFG_PATH}" "$GRUB_MKCONFIG_BIN" -o "$GRUB_CFG_PATH"
-        [[ "$DRY_RUN" -eq 0 ]] && REBOOT_REQUIRED=1
-    fi
-
-    return 0
-}
-
 reload_daemons() {
     run_action 'reloading udev rules' "$UDEVADM_BIN" control --reload-rules
     run_action 'reloading systemd manager' "$SYSTEMCTL_BIN" daemon-reload
@@ -287,7 +273,7 @@ main() {
     restore_managed_mutable_file "$GRUB_DEFAULT_PATH" grub_has_managed_edits
     restore_managed_modprobe_tree
     restore_or_remove_repo_owned_artifacts
-    regenerate_if_needed
+    regenerate_if_dirty
     reload_daemons
 
     if [[ "$REBOOT_REQUIRED" -eq 1 ]]; then

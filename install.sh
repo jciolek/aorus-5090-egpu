@@ -277,20 +277,6 @@ install_host_files() {
   fi
 }
 
-regenerate_if_needed() {
-  if [[ "$MKINITCPIO_DIRTY" -eq 1 ]]; then
-    run_action 'running mkinitcpio -P' "$MKINITCPIO_BIN" -P
-    [[ "$DRY_RUN" -eq 0 ]] && REBOOT_REQUIRED=1
-  fi
-
-  if [[ "$GRUB_DIRTY" -eq 1 ]]; then
-    run_action "running grub-mkconfig -o ${GRUB_CFG_PATH}" "$GRUB_MKCONFIG_BIN" -o "$GRUB_CFG_PATH"
-    [[ "$DRY_RUN" -eq 0 ]] && REBOOT_REQUIRED=1
-  fi
-
-  return 0
-}
-
 reload_daemons() {
   run_action 'reloading udev rules' "$UDEVADM_BIN" control --reload-rules
   run_action 'triggering NVIDIA PCI add uevents' "$UDEVADM_BIN" trigger --subsystem-match=pci --attr-match=vendor=0x10de --attr-match=device=0x22e8 --action=add || true
@@ -325,7 +311,7 @@ main() {
   rewrite_grub "$bridge"
   install_binaries
   install_host_files
-  regenerate_if_needed
+  regenerate_if_dirty
   reload_daemons
 
   if [[ "$REBOOT_REQUIRED" -eq 1 ]]; then

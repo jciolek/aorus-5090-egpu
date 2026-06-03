@@ -208,6 +208,20 @@ install_repo_file() {
     return 0
 }
 
+regenerate_if_dirty() {
+    if [[ "$MKINITCPIO_DIRTY" -eq 1 ]]; then
+        run_action 'running mkinitcpio -P' "$MKINITCPIO_BIN" -P
+        [[ "$DRY_RUN" -eq 0 ]] && REBOOT_REQUIRED=1
+    fi
+
+    if [[ "$GRUB_DIRTY" -eq 1 ]]; then
+        run_action "running grub-mkconfig -o ${GRUB_CFG_PATH}" "$GRUB_MKCONFIG_BIN" -o "$GRUB_CFG_PATH"
+        [[ "$DRY_RUN" -eq 0 ]] && REBOOT_REQUIRED=1
+    fi
+
+    return 0
+}
+
 repo_owned_artifact_paths() {
     printf '%s\n' \
         "${USR_LOCAL_BIN_DIR}/aorus-bridge" \
