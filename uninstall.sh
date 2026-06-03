@@ -178,11 +178,11 @@ grub_has_managed_edits() {
         esac
     done <"$path"
 
-    [[ "$default_value" =~ pci=resource_alignment=35@([[:xdigit:]:.]+)$ ]] || return 1
+    [[ "$linux_value" =~ pci=resource_alignment=35@([[:xdigit:]:.]+)$ ]] || return 1
     bridge="${BASH_REMATCH[1]}"
 
-    grub_value_has_managed_args "$default_value" "$bridge" || return 1
-    grub_value_has_managed_args "$linux_value" "$bridge"
+    grub_value_has_managed_args "$linux_value" "$bridge" || return 1
+    ! grub_value_has_managed_args "$default_value" "$bridge"
 }
 
 modprobe_file_has_managed_edits() {

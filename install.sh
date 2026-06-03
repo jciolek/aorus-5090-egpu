@@ -153,6 +153,7 @@ rewrite_modprobe_tree() {
 canonicalize_cmdline() {
   local bridge="$1"
   local value_expression="$2"
+  local add_required="${3:-1}"
   local token
   local filtered=()
   local tokens=()
@@ -182,7 +183,9 @@ canonicalize_cmdline() {
     esac
   done
 
-  filtered+=("${required[@]}")
+  if [[ "$add_required" -eq 1 ]]; then
+    filtered+=("${required[@]}")
+  fi
   printf '%s\n' "${filtered[*]}"
 }
 
@@ -199,7 +202,7 @@ rewrite_grub() {
       saw_default=1
       key='GRUB_CMDLINE_LINUX_DEFAULT'
       value="${line#${key}=}"
-      new_value="$(canonicalize_cmdline "$bridge" "$value")"
+      new_value="$(canonicalize_cmdline "$bridge" "$value" 0)"
       printf '%s="%s"\n' "$key" "$new_value" >>"$tmp_file"
       [[ "$new_value" == "$(parse_shell_string_value "$value")" ]] || changed=1
       ;;
@@ -207,7 +210,7 @@ rewrite_grub() {
       saw_linux=1
       key='GRUB_CMDLINE_LINUX'
       value="${line#${key}=}"
-      new_value="$(canonicalize_cmdline "$bridge" "$value")"
+      new_value="$(canonicalize_cmdline "$bridge" "$value" 1)"
       printf '%s="%s"\n' "$key" "$new_value" >>"$tmp_file"
       [[ "$new_value" == "$(parse_shell_string_value "$value")" ]] || changed=1
       ;;
@@ -218,12 +221,12 @@ rewrite_grub() {
   done <"$GRUB_DEFAULT_PATH"
 
   if [[ "$saw_linux" -eq 0 ]]; then
-    printf 'GRUB_CMDLINE_LINUX="%s"\n' "$(canonicalize_cmdline "$bridge" "''")" >>"$tmp_file"
+    printf 'GRUB_CMDLINE_LINUX="%s"\n' "$(canonicalize_cmdline "$bridge" "''" 1)" >>"$tmp_file"
     changed=1
   fi
 
   if [[ "$saw_default" -eq 0 ]]; then
-    printf 'GRUB_CMDLINE_LINUX_DEFAULT="%s"\n' "$(canonicalize_cmdline "$bridge" "''")" >>"$tmp_file"
+    printf 'GRUB_CMDLINE_LINUX_DEFAULT="%s"\n' "$(canonicalize_cmdline "$bridge" "''" 0)" >>"$tmp_file"
     changed=1
   fi
 
