@@ -137,8 +137,6 @@ mkinitcpio_has_managed_edits() {
     local line raw token
     local -a modules=()
 
-    managed_backup_exists || return 1
-
     while IFS= read -r line || [[ -n "$line" ]]; do
         [[ "$line" =~ ^MODULES=\((.*)\)$ ]] || continue
         raw="${BASH_REMATCH[1]}"
@@ -147,12 +145,12 @@ mkinitcpio_has_managed_edits() {
         for token in "${modules[@]}"; do
             case "$token" in
                 nvidia|nvidia_drm|nvidia_modeset|nvidia_uvm)
-                    return 1
+                    return 0
                     ;;
             esac
         done
 
-        return 0
+        return 1
     done <"$path"
 
     return 1
@@ -162,8 +160,6 @@ grub_has_managed_edits() {
     local path="$1"
     local line default_value='' linux_value=''
     local bridge
-
-    managed_backup_exists || return 1
 
     while IFS= read -r line || [[ -n "$line" ]]; do
         case "$line" in

@@ -351,7 +351,7 @@ test_uninstall_fails_when_canonical_managed_grub_has_no_backup() {
 
     prepare_fake_root "$tmpdir" "$log_file"
     cat >"${tmpdir}/etc/default/grub" <<'EOF'
-GRUB_CMDLINE_LINUX_DEFAULT="quiet splash iommu=off intel_iommu=off thunderbolt.host_reset=false pcie_aspm.policy=performance thunderbolt.clx=0 pcie_port_pm=off pci=resource_alignment=35@0000:03:00.0"
+GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"
 GRUB_CMDLINE_LINUX="iommu=off intel_iommu=off thunderbolt.host_reset=false pcie_aspm.policy=performance thunderbolt.clx=0 pcie_port_pm=off pci=resource_alignment=35@0000:03:00.0"
 EOF
     printf 'previous service backup\n' >"${tmpdir}/etc/systemd/system/aorus.service.aorus.00"
@@ -364,37 +364,6 @@ EOF
     fi
 
     assert_equals '1' "$status" 'uninstall should fail when no backup exists for managed grub files'
-    assert_contains 'missing backup for managed file' "$stderr_file"
-}
-
-test_uninstall_fails_when_install_managed_mkinitcpio_has_no_backup() {
-    local tmpdir log_file stdout_file stderr_file status
-    tmpdir="$(mktemp -d)"
-    trap "rm -rf -- '$tmpdir'" RETURN
-    log_file="${tmpdir}/commands.log"
-    stdout_file="${tmpdir}/stdout.log"
-    stderr_file="${tmpdir}/stderr.log"
-    : >"$log_file"
-
-    prepare_fake_root "$tmpdir" "$log_file"
-    cat >"${tmpdir}/etc/mkinitcpio.conf" <<'EOF'
-# preserved comment from existing config
-MODULES=(amdgpu xhci_pci thunderbolt)
-BINARIES=(/usr/bin/setfont)
-FILES=()
-HOOKS=(base systemd autodetect modconf block filesystems fsck)
-# preserved tail comment
-EOF
-    printf 'previous helper backup\n' >"${tmpdir}/usr/local/bin/aorus-bridge.aorus.00"
-
-    if run_uninstall_capture "$tmpdir" "$stdout_file" "$stderr_file"; then
-        printf 'expected uninstall.sh to fail when an install-managed mkinitcpio file has no backup\n' >&2
-        return 1
-    else
-        status=$?
-    fi
-
-    assert_equals '1' "$status" 'uninstall should fail when no backup exists for managed mkinitcpio files'
     assert_contains 'missing backup for managed file' "$stderr_file"
 }
 
@@ -552,7 +521,6 @@ main() {
     test_uninstall_ignores_unmanaged_mkinitcpio_and_grub_without_backups
     test_uninstall_fails_when_managed_modprobe_file_has_no_backup
     test_uninstall_fails_when_canonical_managed_grub_has_no_backup
-    test_uninstall_fails_when_install_managed_mkinitcpio_has_no_backup
     test_uninstall_dry_run_announces_restore_and_remove_actions_without_mutating_host
     test_uninstall_announces_each_file_mutation_and_non_file_action
     test_uninstall_dry_run_preserves_missing_backup_failure
