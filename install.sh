@@ -158,13 +158,9 @@ canonicalize_cmdline() {
   local filtered=()
   local tokens=()
   local required=(
-    "iommu=off"
-    "intel_iommu=off"
-    "thunderbolt.host_reset=false"
     "pcie_aspm.policy=performance"
     "thunderbolt.clx=0"
     "pcie_port_pm=off"
-    "pci=resource_alignment=35@${bridge}"
   )
 
   if [[ -n "$value_expression" ]]; then
@@ -175,7 +171,7 @@ canonicalize_cmdline() {
 
   for token in "${tokens[@]}"; do
     case "$token" in
-    *nvidia* | rd.driver.blacklist=*nvidia* | modprobe.blacklist=*nvidia* | module_blacklist=*nvidia* | iommu=* | intel_iommu=* | thunderbolt.host_reset=* | pcie_aspm.policy=* | thunderbolt.clx=* | pcie_port_pm=* | pci=resource_alignment=35@*)
+    *nvidia* | rd.driver.blacklist=*nvidia* | modprobe.blacklist=*nvidia* | module_blacklist=*nvidia* | pcie_aspm.policy=* | thunderbolt.clx=* | pcie_port_pm=*)
       ;;
     *)
       filtered+=("$token")
@@ -258,13 +254,6 @@ install_binaries() {
 install_host_files() {
   local status
 
-  if install_repo_file "${HOST_FILES_DIR}/etc/udev/rules.d/80-aorus-disable-egpu-audio.rules" "${UDEV_RULES_DIR}/80-aorus-disable-egpu-audio.rules" 0644; then
-    :
-  else
-    status=$?
-    [[ "$status" -eq "$INSTALL_REPO_FILE_UNCHANGED" ]] || return "$status"
-  fi
-
   if install_repo_file "${HOST_FILES_DIR}/etc/systemd/system/aorus.service" "${SYSTEMD_ROOT}/aorus.service" 0644; then
     :
   else
@@ -281,8 +270,6 @@ install_host_files() {
 }
 
 reload_daemons() {
-  run_action 'reloading udev rules' "$UDEVADM_BIN" control --reload-rules
-  run_action 'triggering NVIDIA PCI add uevents' "$UDEVADM_BIN" trigger --subsystem-match=pci --attr-match=vendor=0x10de --attr-match=device=0x22e8 --action=add || true
   run_action 'reloading systemd manager' "$SYSTEMCTL_BIN" daemon-reload
   run_action 'enabling aorus.service' "$SYSTEMCTL_BIN" enable aorus.service
 }
@@ -298,7 +285,6 @@ main() {
   require_tool "$GRUB_MKCONFIG_BIN" 'grub-mkconfig'
   require_tool "$INSTALL_BIN" 'install'
   require_tool "$SYSTEMCTL_BIN" 'systemctl'
-  require_tool "$UDEVADM_BIN" 'udevadm'
   [[ -x "$AORUS_BRIDGE_BIN" ]] || die "missing helper: ${AORUS_BRIDGE_BIN}"
   [[ -x "${REPO_ROOT}/aorus-modules" ]] || die "missing helper: ${REPO_ROOT}/aorus-modules"
 

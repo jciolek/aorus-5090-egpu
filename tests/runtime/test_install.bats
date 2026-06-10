@@ -136,7 +136,6 @@ run_setup_with_args() {
     PATH="${root}/bin:${PATH}" \
     ETC_ROOT="${root}/etc" \
     MODPROBE_DIR="${root}/etc/modprobe.d" \
-    UDEV_RULES_DIR="${root}/etc/udev/rules.d" \
     SYSTEMD_ROOT="${root}/etc/systemd/system" \
     USR_LOCAL_BIN_DIR="${root}/usr/local/bin" \
     MKINITCPIO_CONF_PATH="${root}/etc/mkinitcpio.conf" \
@@ -158,7 +157,6 @@ run_setup_with_host_files() {
     PATH="${root}/bin:${PATH}" \
     ETC_ROOT="${root}/etc" \
     MODPROBE_DIR="${root}/etc/modprobe.d" \
-    UDEV_RULES_DIR="${root}/etc/udev/rules.d" \
     SYSTEMD_ROOT="${root}/etc/systemd/system" \
     USR_LOCAL_BIN_DIR="${root}/usr/local/bin" \
     MKINITCPIO_CONF_PATH="${root}/etc/mkinitcpio.conf" \
@@ -200,7 +198,6 @@ prepare_fake_root() {
   local log_file="$2"
 
   mkdir -p "${root}/etc/modprobe.d" "${root}/etc/default" \
-    "${root}/etc/udev/rules.d" "${root}/etc/systemd/system" \
     "${root}/usr/local/bin" "${root}/boot/grub" "${root}/bin"
 
   cat >"${root}/etc/mkinitcpio.conf" <<'EOF'
@@ -224,7 +221,6 @@ EOF
   write_fake_command "${root}/bin/mkinitcpio" "$log_file" 'exit 0'
   write_fake_command "${root}/bin/grub-mkconfig" "$log_file" 'while [[ $# -gt 0 ]]; do if [[ "$1" == "-o" ]]; then shift; : >"$1"; fi; shift; done'
   write_fake_command "${root}/bin/systemctl" "$log_file" 'exit 0'
-  write_fake_command "${root}/bin/udevadm" "$log_file" 'exit 0'
   write_fake_command "${root}/bin/install" "$log_file" '/usr/bin/install "$@"'
 }
 
@@ -328,8 +324,8 @@ test_grub_is_canonicalized_with_detected_bridge() {
 
   assert_file_content "$(
     cat <<'EOF'
-GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"
-GRUB_CMDLINE_LINUX="iommu=off intel_iommu=off thunderbolt.host_reset=false pcie_aspm.policy=performance thunderbolt.clx=0 pcie_port_pm=off pci=resource_alignment=35@0000:03:00.0"
+GRUB_CMDLINE_LINUX_DEFAULT="quiet splash iommu=pt"
+GRUB_CMDLINE_LINUX="pcie_aspm.policy=performance thunderbolt.clx=0 pcie_port_pm=off"
 EOF
   )" "${tmpdir}/etc/default/grub"
   assert_contains 'grub-mkconfig -o ' "$log_file"
@@ -354,8 +350,8 @@ EOF
 
   assert_file_content "$(
     cat <<'EOF'
-GRUB_CMDLINE_LINUX_DEFAULT="quiet splash loglevel=3"
-GRUB_CMDLINE_LINUX="audit=1 iommu=off intel_iommu=off thunderbolt.host_reset=false pcie_aspm.policy=performance thunderbolt.clx=0 pcie_port_pm=off pci=resource_alignment=35@0000:03:00.0"
+GRUB_CMDLINE_LINUX_DEFAULT="quiet splash loglevel=3 iommu=pt"
+GRUB_CMDLINE_LINUX="audit=1 pcie_aspm.policy=performance thunderbolt.clx=0 pcie_port_pm=off"
 EOF
   )" "${tmpdir}/etc/default/grub"
 }
@@ -380,7 +376,7 @@ EOF
   assert_file_content "$(
     cat <<'EOF'
 GRUB_TIMEOUT=3
-GRUB_CMDLINE_LINUX="audit=1 iommu=off intel_iommu=off thunderbolt.host_reset=false pcie_aspm.policy=performance thunderbolt.clx=0 pcie_port_pm=off pci=resource_alignment=35@0000:03:00.0"
+GRUB_CMDLINE_LINUX="audit=1 pcie_aspm.policy=performance thunderbolt.clx=0 pcie_port_pm=off"
 GRUB_CMDLINE_LINUX_DEFAULT=""
 EOF
   )" "${tmpdir}/etc/default/grub"
@@ -405,8 +401,8 @@ EOF
 
   assert_file_content "$(
     cat <<'EOF'
-GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"
-GRUB_CMDLINE_LINUX="audit=1 iommu=off intel_iommu=off thunderbolt.host_reset=false pcie_aspm.policy=performance thunderbolt.clx=0 pcie_port_pm=off pci=resource_alignment=35@0000:03:00.0"
+GRUB_CMDLINE_LINUX_DEFAULT="quiet splash iommu=pt"
+GRUB_CMDLINE_LINUX="audit=1 pcie_aspm.policy=performance thunderbolt.clx=0 pcie_port_pm=off"
 EOF
   )" "${tmpdir}/etc/default/grub"
 }
@@ -491,7 +487,6 @@ test_install_dry_run_announces_actions_without_mutating_host() {
   assert_contains "[dry-run] installing ${tmpdir}/usr/local/bin/aorus-bridge" "$stdout_file"
   assert_contains "[dry-run] installing ${tmpdir}/etc/systemd/system/aorus.service" "$stdout_file"
   assert_contains '[dry-run] running mkinitcpio -P' "$stdout_file"
-  assert_contains '[dry-run] reloading udev rules' "$stdout_file"
   assert_contains 'install complete; no reboot required' "$stdout_file"
 }
 
@@ -548,8 +543,6 @@ test_install_announces_each_file_mutation_and_non_file_action() {
   assert_contains "installing ${tmpdir}/etc/modprobe.d/aorus.conf" "$stdout_file"
   assert_contains 'running mkinitcpio -P' "$stdout_file"
   assert_contains 'running grub-mkconfig -o ' "$stdout_file"
-  assert_contains 'reloading udev rules' "$stdout_file"
-  assert_contains 'triggering NVIDIA PCI add uevents' "$stdout_file"
   assert_contains 'reloading systemd manager' "$stdout_file"
   assert_contains 'enabling aorus.service' "$stdout_file"
 }
@@ -622,17 +615,12 @@ test_installs_host_artifacts_and_enables_service() {
   assert_file_exists "${tmpdir}/usr/local/bin/aorus-bridge"
   assert_file_exists "${tmpdir}/usr/local/bin/aorus-modules"
   assert_file_exists "${tmpdir}/etc/modprobe.d/aorus.conf"
-  assert_file_exists "${tmpdir}/etc/udev/rules.d/80-aorus-disable-egpu-audio.rules"
   assert_file_exists "${tmpdir}/etc/systemd/system/aorus.service"
   assert_file_exists "${tmpdir}/etc/systemd/system/nvidia-persistenced.service.d/aorus.conf"
   assert_same_file "${repo_root}/aorus-bridge" "${tmpdir}/usr/local/bin/aorus-bridge"
   assert_same_file "${repo_root}/aorus-modules" "${tmpdir}/usr/local/bin/aorus-modules"
   assert_same_file "${host_files}/etc/modprobe.d/aorus.conf" "${tmpdir}/etc/modprobe.d/aorus.conf"
-  assert_same_file "${host_files}/etc/udev/rules.d/80-aorus-disable-egpu-audio.rules" "${tmpdir}/etc/udev/rules.d/80-aorus-disable-egpu-audio.rules"
-  assert_same_file "${host_files}/etc/systemd/system/aorus.service" "${tmpdir}/etc/systemd/system/aorus.service"
   assert_same_file "${host_files}/etc/systemd/system/nvidia-persistenced.service.d/aorus.conf" "${tmpdir}/etc/systemd/system/nvidia-persistenced.service.d/aorus.conf"
-  assert_contains 'udevadm control --reload-rules' "$log_file"
-  assert_contains 'udevadm trigger --subsystem-match=pci --attr-match=vendor=0x10de --attr-match=device=0x22e8 --action=add' "$log_file"
   assert_contains 'systemctl daemon-reload' "$log_file"
   assert_contains 'systemctl enable aorus.service' "$log_file"
 }
