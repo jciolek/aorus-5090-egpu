@@ -8,6 +8,10 @@ If you want to make sure that this repo is what you need, have a look at [this G
 This repo is a Manjaro adaptation of [apnex/nvidia-driver-injector](https://github.com/apnex/nvidia-driver-injector),
 which first demonstrated that this set of driver and system patches actually works.
 
+**If you run nvidia 610.43.02 checkout the branch `nvidia-610.43.02`**
+
+The change surface is a lot narrower with the new driver.
+
 ## Overview
 
 There is a lot of detailed information about the issue in the driver-injector repository and the GitHub issue linked above.
