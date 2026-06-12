@@ -104,6 +104,46 @@ rewrite_mkinitcpio() {
   fi
 }
 
+# initramfs-tools (Debian/Ubuntu) lists force-loaded modules one per line in
+# /etc/initramfs-tools/modules. Strip any NVIDIA entries so they are not pulled
+# into the initramfs ahead of the bridge cap; the modprobe.d blacklist (baked
+# into the initramfs by update-initramfs) handles the rest.
+rewrite_initramfs_tools_modules() {
+  local tmp_file line module changed=0
+
+  [[ -f "$INITRAMFS_MODULES_PATH" ]] || return 0
+
+  tmp_file="$(mktemp)"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    # The module name is the first whitespace-delimited token on the line.
+    module="${line%%[[:space:]]*}"
+    case "$module" in
+    nvidia | nvidia_drm | nvidia_modeset | nvidia_uvm)
+      changed=1
+      continue
+      ;;
+    esac
+    printf '%s\n' "$line" >>"$tmp_file"
+  done <"$INITRAMFS_MODULES_PATH"
+
+  if [[ "$changed" -eq 1 ]] && write_if_changed "$INITRAMFS_MODULES_PATH" "$tmp_file"; then
+    MKINITCPIO_DIRTY=1
+  else
+    rm -f -- "$tmp_file"
+  fi
+}
+
+rewrite_initramfs_modules() {
+  case "$INITRAMFS_BACKEND" in
+  initramfs-tools)
+    rewrite_initramfs_tools_modules
+    ;;
+  *)
+    rewrite_mkinitcpio
+    ;;
+  esac
+}
+
 rewrite_modprobe_file() {
   local file="$1"
   local tmp_file line changed=0
@@ -281,7 +321,7 @@ main() {
   parse_common_args "$@"
 
   require_root 'install.sh'
-  require_tool "$MKINITCPIO_BIN" 'mkinitcpio'
+  detect_initramfs_backend
   require_tool "$GRUB_MKCONFIG_BIN" 'grub-mkconfig'
   require_tool "$INSTALL_BIN" 'install'
   require_tool "$SYSTEMCTL_BIN" 'systemctl'
@@ -295,7 +335,7 @@ main() {
     exit "$status"
   fi
 
-  rewrite_mkinitcpio
+  rewrite_initramfs_modules
   rewrite_modprobe_tree
   rewrite_grub "$bridge"
   install_binaries

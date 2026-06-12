@@ -30,7 +30,7 @@ mark_generated_artifacts_dirty() {
   local target="$1"
 
   case "$target" in
-  "$MKINITCPIO_CONF_PATH" | "$MODPROBE_DIR"/*.conf)
+  "$MKINITCPIO_CONF_PATH" | "$INITRAMFS_MODULES_PATH" | "$MODPROBE_DIR"/*.conf)
     MKINITCPIO_DIRTY=1
     ;;
   esac
@@ -44,6 +44,7 @@ managed_backup_exists() {
   local path file found=1
 
   if newest_backup_path_for "$MKINITCPIO_CONF_PATH" >/dev/null 2>&1 ||
+    newest_backup_path_for "$INITRAMFS_MODULES_PATH" >/dev/null 2>&1 ||
     newest_backup_path_for "$GRUB_DEFAULT_PATH" >/dev/null 2>&1; then
     return 0
   fi
@@ -156,6 +157,33 @@ mkinitcpio_has_managed_edits() {
   return 1
 }
 
+initramfs_tools_has_managed_edits() {
+  local path="$1"
+  local line module
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    module="${line%%[[:space:]]*}"
+    case "$module" in
+    nvidia | nvidia_drm | nvidia_modeset | nvidia_uvm)
+      return 0
+      ;;
+    esac
+  done <"$path"
+
+  return 1
+}
+
+restore_managed_initramfs_config() {
+  case "$INITRAMFS_BACKEND" in
+  initramfs-tools)
+    restore_managed_mutable_file "$INITRAMFS_MODULES_PATH" initramfs_tools_has_managed_edits
+    ;;
+  *)
+    restore_managed_mutable_file "$MKINITCPIO_CONF_PATH" mkinitcpio_has_managed_edits
+    ;;
+  esac
+}
+
 grub_has_managed_edits() {
   local path="$1"
   local line default_value='' linux_value=''
@@ -256,14 +284,14 @@ main() {
   parse_common_args "$@"
 
   require_root 'uninstall.sh'
-  require_tool "$MKINITCPIO_BIN" 'mkinitcpio'
+  detect_initramfs_backend
   require_tool "$GRUB_MKCONFIG_BIN" 'grub-mkconfig'
   require_tool "$SYSTEMCTL_BIN" 'systemctl'
 
   run_quiet_action 'disabling aorus.service' "$SYSTEMCTL_BIN" disable aorus.service || true
 
   best_effort_runtime_rollback
-  restore_managed_mutable_file "$MKINITCPIO_CONF_PATH" mkinitcpio_has_managed_edits
+  restore_managed_initramfs_config
   restore_managed_mutable_file "$GRUB_DEFAULT_PATH" grub_has_managed_edits
   restore_managed_modprobe_tree
   restore_or_remove_repo_owned_artifacts

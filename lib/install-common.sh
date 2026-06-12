@@ -9,10 +9,15 @@ MODPROBE_DIR="${MODPROBE_DIR:-${ETC_ROOT}/modprobe.d}"
 SYSTEMD_ROOT="${SYSTEMD_ROOT:-${ETC_ROOT}/systemd/system}"
 USR_LOCAL_BIN_DIR="${USR_LOCAL_BIN_DIR:-/usr/local/bin}"
 MKINITCPIO_CONF_PATH="${MKINITCPIO_CONF_PATH:-${ETC_ROOT}/mkinitcpio.conf}"
+INITRAMFS_MODULES_PATH="${INITRAMFS_MODULES_PATH:-${ETC_ROOT}/initramfs-tools/modules}"
 GRUB_DEFAULT_PATH="${GRUB_DEFAULT_PATH:-${ETC_ROOT}/default/grub}"
 GRUB_CFG_PATH="${GRUB_CFG_PATH:-/boot/grub/grub.cfg}"
 
 MKINITCPIO_BIN="${MKINITCPIO_BIN:-mkinitcpio}"
+UPDATE_INITRAMFS_BIN="${UPDATE_INITRAMFS_BIN:-update-initramfs}"
+# Selected initramfs backend: 'mkinitcpio' (Arch/Manjaro) or 'initramfs-tools' (Debian/Ubuntu).
+# Left empty so detect_initramfs_backend can pick one; override to force a backend.
+INITRAMFS_BACKEND="${INITRAMFS_BACKEND:-}"
 GRUB_MKCONFIG_BIN="${GRUB_MKCONFIG_BIN:-grub-mkconfig}"
 SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
 INSTALL_BIN="${INSTALL_BIN:-install}"
@@ -103,6 +108,23 @@ require_tool() {
   local label="$2"
 
   command -v "$path" >/dev/null 2>&1 || die "missing required tool: ${label}"
+}
+
+# Pick the initramfs backend for this host. Prefers mkinitcpio when present so
+# Arch/Manjaro behaviour is unchanged; falls back to initramfs-tools on
+# Debian/Ubuntu. Respects an explicit INITRAMFS_BACKEND override.
+detect_initramfs_backend() {
+  if [[ -n "$INITRAMFS_BACKEND" ]]; then
+    return 0
+  fi
+
+  if command -v "$MKINITCPIO_BIN" >/dev/null 2>&1; then
+    INITRAMFS_BACKEND='mkinitcpio'
+  elif command -v "$UPDATE_INITRAMFS_BIN" >/dev/null 2>&1; then
+    INITRAMFS_BACKEND='initramfs-tools'
+  else
+    die 'missing required tool: mkinitcpio or update-initramfs'
+  fi
 }
 
 backup_path_for() {
@@ -208,7 +230,14 @@ install_repo_file() {
 
 regenerate_if_dirty() {
   if [[ "$MKINITCPIO_DIRTY" -eq 1 ]]; then
-    run_action 'running mkinitcpio -P' "$MKINITCPIO_BIN" -P
+    case "$INITRAMFS_BACKEND" in
+    initramfs-tools)
+      run_action 'running update-initramfs -u' "$UPDATE_INITRAMFS_BIN" -u
+      ;;
+    *)
+      run_action 'running mkinitcpio -P' "$MKINITCPIO_BIN" -P
+      ;;
+    esac
     [[ "$DRY_RUN" -eq 0 ]] && REBOOT_REQUIRED=1
   fi
 
