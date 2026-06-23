@@ -65,8 +65,15 @@
 
 set -u
 
-VENDOR_ID="0x10de"        # NVIDIA
-DEVICE_ID="0x2b85"        # RTX 5090
+VENDOR_ID="${VENDOR_ID:-0x10de}"   # NVIDIA
+# DEVICE_ID: exact PCI device id to match (e.g. 0x2b85 for RTX 5090). Leave
+# empty to match ANY NVIDIA display controller by PCI class — this covers the
+# whole RTX 50-series (5090=0x2b85, 5060 Ti=0x2d04, …) without a hardcoded list,
+# in the same spirit as is_tb_tunneled below. Set DEVICE_ID to pin one board.
+DEVICE_ID="${DEVICE_ID:-}"
+# PCI base class 0x03 = display controller (VGA 0x0300 / 3D 0x0302); selects the
+# GPU function and excludes its HDMI-audio function (class 0x0403).
+GPU_CLASS_PREFIX="${GPU_CLASS_PREFIX:-0x03}"
 SETPCI_BIN="${SETPCI_BIN:-setpci}"
 LSPCI_BIN="${LSPCI_BIN:-lspci}"
 PCI_SYSFS_ROOT="${PCI_SYSFS_ROOT:-/sys/bus/pci/devices}"
@@ -107,15 +114,30 @@ green() { printf '\033[32m%s\033[0m\n' "$*"; }
 yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
 red() { printf '\033[31m%s\033[0m\n' "$*" >&2; }
 
-# Find the PCI bridge directly above the AORUS RTX 5090 by walking
-# ${PCI_SYSFS_ROOT} for the matching vendor:device, then taking
-# the parent in the device tree. Works on either NUC TB4 port.
+# True if a ${PCI_SYSFS_ROOT} entry is the NVIDIA GPU we manage: NVIDIA vendor
+# plus either the pinned DEVICE_ID (when set) or any display-controller class.
+is_managed_gpu() {
+    local dir="$1" v dv cls
+    [[ -r "$dir/vendor" && -r "$dir/device" ]] || return 1
+    v=$(<"$dir/vendor")
+    [[ "$v" == "$VENDOR_ID" ]] || return 1
+    if [[ -n "$DEVICE_ID" ]]; then
+        dv=$(<"$dir/device")
+        [[ "$dv" == "$DEVICE_ID" ]]
+        return
+    fi
+    [[ -r "$dir/class" ]] || return 1
+    cls=$(<"$dir/class")
+    [[ "$cls" == "${GPU_CLASS_PREFIX}"* ]]
+}
+
+# Find the PCI bridge directly above the NVIDIA eGPU by walking
+# ${PCI_SYSFS_ROOT} for the matching device, then taking the parent in the
+# device tree. Works on any TB/USB4 port.
 detect_bridge() {
-    local d v dv
+    local d
     for d in "$PCI_SYSFS_ROOT"/*; do
-        [[ -r "$d/vendor" && -r "$d/device" ]] || continue
-        v=$(<"$d/vendor"); dv=$(<"$d/device")
-        if [[ "$v" == "$VENDOR_ID" && "$dv" == "$DEVICE_ID" ]]; then
+        if is_managed_gpu "$d"; then
             basename "$(dirname "$(readlink -f "$d")")"
             return 0
         fi
@@ -167,7 +189,7 @@ is_tb_tunneled() {
 BRIDGE="${BRIDGE:-$(detect_bridge || true)}"
 
 if [[ -z "$BRIDGE" ]]; then
-    yellow "No AORUS RTX 5090 (${VENDOR_ID}:${DEVICE_ID}) found on PCI bus"
+    yellow "No NVIDIA eGPU (vendor ${VENDOR_ID}${DEVICE_ID:+, device ${DEVICE_ID}}) found on PCI bus"
     yellow "(this is expected if the eGPU is disconnected; oneshot exits clean)"
     exit 0
 fi
@@ -175,11 +197,9 @@ fi
 # Need the GPU's BDF for TB-tunneled detection. detect_bridge already
 # walked ${PCI_SYSFS_ROOT} so re-walking is cheap.
 detect_gpu_bdf() {
-    local d v dv
+    local d
     for d in "$PCI_SYSFS_ROOT"/*; do
-        [[ -r "$d/vendor" && -r "$d/device" ]] || continue
-        v=$(<"$d/vendor"); dv=$(<"$d/device")
-        if [[ "$v" == "$VENDOR_ID" && "$dv" == "$DEVICE_ID" ]]; then
+        if is_managed_gpu "$d"; then
             basename "$(readlink -f "$d")"
             return 0
         fi

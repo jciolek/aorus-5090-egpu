@@ -197,10 +197,18 @@ canonicalize_cmdline() {
   local token
   local filtered=()
   local tokens=()
+  # NOTE: the original validated stack used iommu=off / intel_iommu=off, but on
+  # this Meteor Lake host that disables VT-d interrupt remapping and kills WiFi.
+  # iommu.passthrough=1 keeps the IOMMU initialized (WiFi works) while giving
+  # devices identity-mapped DMA — avoids translation-fault isolation of the eGPU
+  # without the collateral damage.
   local required=(
+    "iommu.passthrough=1"
+    "thunderbolt.host_reset=false"
     "pcie_aspm.policy=performance"
     "thunderbolt.clx=0"
     "pcie_port_pm=off"
+    "pci=resource_alignment=35@${bridge}"
   )
 
   if [[ -n "$value_expression" ]]; then
@@ -211,7 +219,7 @@ canonicalize_cmdline() {
 
   for token in "${tokens[@]}"; do
     case "$token" in
-    *nvidia* | rd.driver.blacklist=*nvidia* | modprobe.blacklist=*nvidia* | module_blacklist=*nvidia* | pcie_aspm.policy=* | thunderbolt.clx=* | pcie_port_pm=*)
+    *nvidia* | rd.driver.blacklist=*nvidia* | modprobe.blacklist=*nvidia* | module_blacklist=*nvidia* | iommu=* | intel_iommu=* | iommu.passthrough=* | thunderbolt.host_reset=* | pcie_aspm.policy=* | thunderbolt.clx=* | pcie_port_pm=* | pci=resource_alignment=35@*)
       ;;
     *)
       filtered+=("$token")
