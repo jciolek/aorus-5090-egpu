@@ -28,6 +28,18 @@ The install tool patches up configuration (see below).
 
 The uninstall tool tries to restore the system state to what it was prior to the installation.
 
+### Supported distributions
+
+The tooling auto-detects the host's initramfs system:
+
+* **Arch / Manjaro** — uses `mkinitcpio` and `/etc/mkinitcpio.conf`.
+* **Debian / Ubuntu** — uses `update-initramfs` and `/etc/initramfs-tools/modules`.
+
+Everything else (GRUB cmdline, `modprobe.d` policy, the systemd service and the
+helper binaries) is identical across distributions. You can force a backend with
+`INITRAMFS_BACKEND=mkinitcpio` or `INITRAMFS_BACKEND=initramfs-tools` if detection
+guesses wrong.
+
 **This works on my machine. It has not been tested on anyone else's.**
 
 ## Install
@@ -38,11 +50,12 @@ The uninstall tool tries to restore the system state to what it was prior to the
 
 This does the following:
 
-- Rewrites `/etc/mkinitcpio.conf` to remove conflicting NVIDIA modules
+- Removes conflicting NVIDIA modules from the initramfs module list
+  (`/etc/mkinitcpio.conf` on Arch/Manjaro, `/etc/initramfs-tools/modules` on Debian/Ubuntu)
 - Rewrites `/etc/modprobe.d/*.conf` to disable conflicting NVIDIA modules
 - Rewrites `/etc/default/grub` with correct kernel parameters for the GPU bridge
 - Installs `aorus-bridge` and `aorus-modules` binaries to `/usr/local/bin`
-- Regenerates `mkinitcpio` and GRUB configs if they were changed
+- Regenerates the initramfs (`mkinitcpio -P` or `update-initramfs -u`) and GRUB configs if they were changed
 
 **Installation creates backup files** (marked with `.aorus.*` suffix) for all files it modifies
 and for all files it installs. **`uninstall.sh` uses these backups to reverse the changes**.
@@ -67,7 +80,7 @@ Reverses everything `install.sh` did:
 
 This does the following:
 
-- Restores `mkinitcpio.conf`, `grub`, and `modprobe.d` files from their `.aorus.*` backups
+- Restores the initramfs module list (`mkinitcpio.conf` or `initramfs-tools/modules`), `grub`, and `modprobe.d` files from their `.aorus.*` backups
 - Removes files installed by this repo (those without backups)
 - Disables the `aorus.service` systemd unit
 - Restores the live bridge state and unloads NVIDIA modules

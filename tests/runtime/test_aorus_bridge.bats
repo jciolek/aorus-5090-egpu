@@ -126,6 +126,7 @@ create_fake_detect_sysfs() {
     mkdir -p "$gpu_dir" "$root"
     printf '0x10de\n' >"${gpu_dir}/vendor"
     printf '0x2b85\n' >"${gpu_dir}/device"
+    printf '0x030000\n' >"${gpu_dir}/class"
     ln -s "$gpu_dir" "${root}/gpu0"
 }
 
